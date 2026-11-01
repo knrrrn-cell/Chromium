@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(cors());
@@ -16,9 +17,9 @@ let browser;
 async function getBrowser() {
   if (browser && browser.connected) return browser;
   browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
-      '--no-zygote', '--single-process', '--mute-audio']
+    args: [...chromium.args, '--mute-audio'],
+    executablePath: await chromium.executablePath(),
+    headless: 'shell'
   });
   return browser;
 }
