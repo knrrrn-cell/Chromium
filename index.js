@@ -272,4 +272,6 @@ app.get('/shot', async (req, res) => {
   }
 });
 
+require('./carnoots')(app, { getBrowser, enqueue, resolve });
+
 app.listen(PORT, () => console.log('resolver port', PORT));
