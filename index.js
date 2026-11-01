@@ -25,6 +25,16 @@ async function getBrowser() {
 }
 
 // Tek seferde 1 iş (Render ücretsiz planda RAM az)
+process.on('unhandledRejection', (e) => console.error('unhandledRejection', e && e.message));
+process.on('uncaughtException', (e) => console.error('uncaughtException', e && e.message));
+function resetBrowser(e) {
+  const m = String((e && e.message) || e);
+  if (/Target closed|Protocol error|Session closed|Connection closed|disconnected/i.test(m)) {
+    try { browser && browser.close().catch(() => {}); } catch (_) {}
+    browser = null;
+  }
+}
+
 let queue = Promise.resolve();
 const enqueue = (fn) => (queue = queue.then(fn, fn));
 
@@ -71,6 +81,7 @@ async function resolve(pageUrl, waitMs = 20000) {
   const found = new Map();
   const origin = new URL(pageUrl).origin;
   let currentProvider = 'varsayilan';
+  let onTarget = null;
 
   try {
     await page.setUserAgent(UA);
@@ -108,13 +119,16 @@ async function resolve(pageUrl, waitMs = 20000) {
       req.continue();
     });
 
-    // Popup / yeni sekme engelle
-    b.on('targetcreated', async (t) => {
-      if (t.type() === 'page') {
-        const p = await t.page().catch(() => null);
-        if (p && p !== page) p.close().catch(() => {});
-      }
-    });
+    // Popup engelle: sadece bu sayfanın açtığı yeni sekmeleri kapat
+    onTarget = async (t) => {
+      try {
+        if (t.type() === 'page' && t.opener() === page.target()) {
+          const p = await t.page().catch(() => null);
+          if (p) p.close().catch(() => {});
+        }
+      } catch (_) {}
+    };
+    b.on('targetcreated', onTarget);
 
     await page.evaluateOnNewDocument(() => {
       window.open = () => null;
@@ -172,6 +186,7 @@ async function resolve(pageUrl, waitMs = 20000) {
     const frames = page.frames().map((f) => f.url()).filter((u) => u.startsWith('http'));
     return { providers: [...new Set([...found.values()].map((f) => f.provider))], sources: [...found.values()], tabs, frames };
   } finally {
+    if (onTarget) b.off('targetcreated', onTarget);
     await page.close().catch(() => {});
   }
 }
@@ -190,6 +205,7 @@ app.get('/resolve', async (req, res) => {
     if (data.sources.length) cache.set(url, { t: Date.now(), data });
     res.json(data);
   } catch (e) {
+    resetBrowser(e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
@@ -235,6 +251,7 @@ app.get('/debug', async (req, res) => {
     });
     res.json(out);
   } catch (e) {
+    resetBrowser(e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
@@ -250,6 +267,7 @@ app.get('/shot', async (req, res) => {
     });
     res.set('Content-Type', 'image/jpeg').send(buf);
   } catch (e) {
+    resetBrowser(e);
     res.status(500).send(String(e.message || e));
   }
 });
