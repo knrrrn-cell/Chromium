@@ -274,5 +274,6 @@ app.get('/shot', async (req, res) => {
 
 require('./carnoots')(app, { getBrowser, enqueue, resolve });
 require('./dizigom')(app, { getBrowser, enqueue, resolve });
+require('./hdfilmdelisi')(app, { getBrowser, enqueue, resolve });
 
 app.listen(PORT, () => console.log('resolver port', PORT));
