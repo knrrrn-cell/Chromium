@@ -1,0 +1,13 @@
+{
+  "carnoots": {
+    "base": "https://carnoots.com",
+    "video": "https://video.carnoots.com/{slug}/s{s}/e{e}/master.m3u8"
+  },
+  "dizigom": {
+    "base": "https://www.dizigom.news"
+  },
+  "hdfilmdelisi": {
+    "base": "https://hdfilmdelisi.one",
+    "film": "https://ha.vixolity.com/vs/{imdb}"
+  }
+}
