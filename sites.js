@@ -13,7 +13,8 @@ const DEFAULTS = {
   },
   hdfilmdelisi: {
     base: 'https://hdfilmdelisi.one',
-    film: 'https://ha.vixolity.com/vs/{imdb}'
+    film: 'https://ha.vixolity.com/vs/{imdb}',
+    dizi: 'https://ha.vixolity.com/vs/{imdb}/s{s}/e{ee}'
   }
 };
 
