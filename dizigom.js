@@ -40,6 +40,42 @@ async function searchSite(getBrowser, q) {
   }
 }
 
+// Hızlı yol: arama sayfası sunucu tarafında üretildiği için tarayıcı açmadan düz istekle okunabilir
+function parseResults(html) {
+  const host = new URL(baseOf()).hostname.replace(/^www\./, '');
+  const re = new RegExp(host.replace(/\./g, '\\.') + '\\/(film|diziler)\\/([^\\/?#]+)\\/?$', 'i');
+  const out = new Map();
+  const aRe = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = aRe.exec(html))) {
+    let href = m[1];
+    if (href.startsWith('/')) href = baseOf() + href;
+    const mm = href.match(re);
+    if (!mm) continue;
+    const text = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+    const ys = text.match(/\b(19|20)\d{2}\b/g);
+    const key = mm[1].toLowerCase() + '/' + mm[2];
+    const prev = out.get(key);
+    if (!prev || text.length > prev.text.length) {
+      out.set(key, { kind: mm[1].toLowerCase() === 'film' ? 'movie' : 'tv', slug: mm[2], text, year: ys ? Number(ys[ys.length - 1]) : null });
+    }
+  }
+  return [...out.values()];
+}
+
+async function searchHttp(q) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const r = await fetch(`${baseOf()}/ara?q=${encodeURIComponent(q)}`, {
+      headers: { 'user-agent': UA, 'accept-language': 'tr-TR,tr;q=0.9' }, signal: ctrl.signal
+    });
+    if (!r.ok) return null;
+    const list = parseResults(await r.text());
+    return list.length ? list : null;
+  } catch (_) { return null; } finally { clearTimeout(to); }
+}
+
 function pickBest(cands, names, year, kind) {
   const wanted = names.map((n) => ({ n: norm(n), s: slugify(n) })).filter((w) => w.n);
   let best = null;
@@ -61,7 +97,7 @@ function pickBest(cands, names, year, kind) {
 module.exports = function register(app, { getBrowser, enqueue, resolve }) {
   sites.register(app);
   const cache = new Map();
-  const TTL = (Number(process.env.CACHE_MIN) || 10) * 60 * 1000;
+  const TTL = (Number(process.env.CACHE_MIN) || 120) * 60 * 1000;
 
   app.get('/find/dizigom', async (req, res) => {
     const names = String(req.query.names || '').split('|').map((s) => s.trim()).filter(Boolean);
@@ -76,18 +112,29 @@ module.exports = function register(app, { getBrowser, enqueue, resolve }) {
     if (hit && Date.now() - hit.t < TTL) return res.json({ cached: true, ...hit.data });
 
     try {
-      const data = await enqueue(async () => {
-        let match = null;
+      const data = await sites.once('dizigom#' + key, async () => {
+        // 1) Aramayı tarayıcısız dene (hızlı)
+        let match = null, httpOk = false;
         for (const n of names) {
-          const cands = await searchSite(getBrowser, n);
-          match = pickBest(cands, names, year, kind);
-          if (match) break;
+          const cands = await searchHttp(n);
+          if (cands) { httpOk = true; match = pickBest(cands, names, year, kind); if (match) break; }
+        }
+        // 2) Düz istek hiç sonuç vermediyse eski yöntem: Chromium ile ara
+        if (!match && !httpOk) {
+          match = await enqueue(async () => {
+            for (const n of names) {
+              const cands = await searchSite(getBrowser, n);
+              const m = pickBest(cands, names, year, kind);
+              if (m) return m;
+            }
+            return null;
+          });
         }
         if (!match) return { site: 'dizigom', found: false, tried: names };
         const watchUrl = kind === 'movie'
           ? `${baseOf()}/film/${match.slug}`
           : `${baseOf()}/${match.slug}-${s}-sezon-${e}-bolum/`;
-        const r = await resolve(watchUrl, 25000);
+        const r = await enqueue(() => resolve(watchUrl, 25000));
         // master varsa ara playlistleri (p=stream_...) ayrı kaynak gösterme
         let sources = r.sources;
         if (sources.some((x) => !/[?&]p=/.test(x.url))) sources = sources.filter((x) => !/[?&]p=/.test(x.url));
