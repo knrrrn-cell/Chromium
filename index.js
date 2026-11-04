@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(cors());
@@ -16,11 +15,21 @@ const AD_HOSTS = ['doubleclick', 'googlesyndication', 'adservice', 'popads', 'po
 let browser;
 async function getBrowser() {
   if (browser && browser.connected) return browser;
-  browser = await puppeteer.launch({
-    args: [...chromium.args, '--mute-audio'],
-    executablePath: await chromium.executablePath(),
-    headless: 'shell'
-  });
+  if (process.env.CHROME_PATH) {
+    // Evdeki Raspberry Pi / bilgisayar: sistemdeki Chromium
+    browser = await puppeteer.launch({
+      executablePath: process.env.CHROME_PATH,
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--mute-audio']
+    });
+  } else {
+    const chromium = require('@sparticuz/chromium'); // sadece Render'da gerekir
+    browser = await puppeteer.launch({
+      args: [...chromium.args, '--mute-audio'],
+      executablePath: await chromium.executablePath(),
+      headless: 'shell'
+    });
+  }
   return browser;
 }
 
@@ -35,11 +44,18 @@ function resetBrowser(e) {
   }
 }
 
-let queue = Promise.resolve();
-const enqueue = (fn) => (queue = queue.then(fn, fn));
+const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY) || 1);
+let active = 0;
+const waiters = [];
+async function enqueue(fn) {
+  if (active >= CONCURRENCY) await new Promise((r) => waiters.push(r));
+  active++;
+  try { return await fn(); }
+  finally { active--; const n = waiters.shift(); if (n) n(); }
+}
 
 const cache = new Map(); // url -> {t, data}
-const TTL = 10 * 60 * 1000;
+const TTL = (Number(process.env.CACHE_MIN) || 10) * 60 * 1000;
 
 async function tryPlay(page) {
   // Oynatıcı kutusu: 16:9'a yakın büyük iframe/video/player alanları. Gerçek fare tıklaması yapılır.
@@ -103,7 +119,7 @@ async function resolve(pageUrl, waitMs = 20000) {
       const u = req.url();
       const type = req.resourceType();
       if (AD_HOSTS.some((h) => u.includes(h))) return req.abort();
-      if (type === 'font') return req.abort();
+      if (type === 'font' || (process.env.FAST === '1' && type === 'image')) return req.abort();
       if (MEDIA_RE.test(u)) {
         if (!found.has(u)) {
           found.set(u, {
@@ -138,7 +154,7 @@ async function resolve(pageUrl, waitMs = 20000) {
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
     // Sağlayıcı sekmelerini bul (ör. Close | Rapidrame)
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 800));
     const tabs = await page.evaluate(() => {
       const norm = (t) => (t || '').trim();
       const leaf = [...document.querySelectorAll('a,button,li,span,div')]
@@ -178,9 +194,9 @@ async function resolve(pageUrl, waitMs = 20000) {
       while (Date.now() - start < waitMs / providers.length + 6000 && !has()) {
         await tryPlay(page);
         clicks++;
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, 600));
       }
-      if (has()) await new Promise((r) => setTimeout(r, 1200));
+      if (has()) await new Promise((r) => setTimeout(r, 500));
     }
 
     const frames = page.frames().map((f) => f.url()).filter((u) => u.startsWith('http'));
