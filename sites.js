@@ -48,6 +48,16 @@ function register(app) {
   registered = true;
   // Uygulama bu adresten desenleri okur (TV'ye yeniden kurulum gerekmez)
   app.get('/sites', (req, res) => res.json(all()));
+  try { require('./trace')(app); } catch (e) { console.error('trace yüklenemedi:', e.message); }
 }
 
-module.exports = { get, base, all, register };
+// Aynı anahtarla gelen eşzamanlı istekler tek bir işi paylaşır (ön yükleme + gerçek istek çift iş yapmasın)
+const pending = new Map();
+function once(key, fn) {
+  if (pending.has(key)) return pending.get(key);
+  const p = Promise.resolve().then(fn).finally(() => pending.delete(key));
+  pending.set(key, p);
+  return p;
+}
+
+module.exports = { get, base, all, register, once };
