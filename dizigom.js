@@ -21,7 +21,7 @@ async function searchSite(getBrowser, q) {
     const host = new URL(baseOf()).hostname.replace(/^www\./, '');
     return await page.evaluate((host) => {
       const out = new Map();
-      const re = new RegExp(host.replace(/\./g, '\\.') + '\\/(film|diziler)\\/([^\\/?#]+)\\/?$', 'i');
+      const re = new RegExp(host.replace(/\./g, '\\.') + '(?::\\d+)?\\/(film|diziler)\\/([^\\/?#]+)\\/?$', 'i');
       document.querySelectorAll('a[href]').forEach((a) => {
         const m = (a.href || '').match(re);
         if (!m) return;
@@ -43,7 +43,7 @@ async function searchSite(getBrowser, q) {
 // Hızlı yol: arama sayfası sunucu tarafında üretildiği için tarayıcı açmadan düz istekle okunabilir
 function parseResults(html) {
   const host = new URL(baseOf()).hostname.replace(/^www\./, '');
-  const re = new RegExp(host.replace(/\./g, '\\.') + '\\/(film|diziler)\\/([^\\/?#]+)\\/?$', 'i');
+  const re = new RegExp(host.replace(/\./g, '\\.') + '(?::\\d+)?\\/(film|diziler)\\/([^\\/?#]+)\\/?$', 'i');
   const out = new Map();
   const aRe = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
@@ -74,6 +74,68 @@ async function searchHttp(q) {
     const list = parseResults(await r.text());
     return list.length ? list : null;
   } catch (_) { return null; } finally { clearTimeout(to); }
+}
+
+// ---- Hızlı yol: Chromium olmadan, düz isteklerle (bölüm sayfası -> s.php -> token.php -> stream.php) ----
+async function httpGet(url, headers = {}, ms = 12000, max = 300000) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { headers: { 'user-agent': UA, 'accept-language': 'tr-TR,tr;q=0.9', ...headers }, redirect: 'follow', signal: ctrl.signal });
+    const buf = Buffer.from(await r.arrayBuffer()).subarray(0, max);
+    return { status: r.status, text: buf.toString('utf8') };
+  } catch (_) { return { status: 0, text: '' }; } finally { clearTimeout(to); }
+}
+
+// Sadece durum kodu (gövdeyi okumadan): TV gibi başlıksız istek
+async function httpStatus(url, headers = {}) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(url, { headers: { 'user-agent': UA, ...headers }, redirect: 'follow', signal: ctrl.signal });
+    try { await r.body.cancel(); } catch (_) {}
+    return r.status;
+  } catch (_) { return 0; } finally { clearTimeout(to); }
+}
+
+// Linki hiç Referer/Origin göndermeden (TV gibi) master -> alt liste -> parça olarak dene
+async function playableWithoutHeaders(link) {
+  const m = await httpGet(link, {}, 12000, 100000);
+  if (m.status !== 200 || !/^\s*#EXTM3U/.test(m.text)) return `master reddedildi (${m.status})`;
+  const variant = m.text.split(/\r?\n/).find((l) => l && !l.startsWith('#'));
+  if (!variant) return '';
+  const vurl = new URL(variant.replace(/&amp;/g, '&'), link).href;
+  const v = await httpGet(vurl, {}, 12000, 100000);
+  if (v.status !== 200 || !/^\s*#EXTM3U/.test(v.text)) return `alt liste reddedildi (${v.status})`;
+  const seg = v.text.split(/\r?\n/).find((l) => l && !l.startsWith('#'));
+  if (!seg) return '';
+  const st = await httpStatus(new URL(seg, vurl).href, { Range: 'bytes=0-1023' });
+  return st === 200 || st === 206 ? '' : `video parçası reddedildi (${st})`;
+}
+
+async function fastLink(watchUrl) {
+  const siteOrigin = new URL(watchUrl).origin;
+  const page = await httpGet(watchUrl);
+  if (page.status !== 200) return { fail: `bölüm sayfası açılmadı (${page.status})` };
+  const idm = page.text.match(/data-pv=["']([A-Za-z0-9_-]{16,40})["']/);
+  if (!idm) return { fail: 'sayfada oynatıcı kimliği (data-pv) yok' };
+  const core = page.text.match(/<script[^>]+src=["'](https?:\/\/[^"']+\/(?:assets\/js\/core|e\/c)\.js[^"']*)["']/i);
+  if (!core) return { fail: 'oynatıcı betiği (core.js) bulunamadı' };
+  const pOrigin = new URL(core[1]).origin;
+  const sUrl = `${pOrigin}/assets/js/s.php?s=${encodeURIComponent(idm[1])}`;
+  const sp = await httpGet(sUrl, { Referer: watchUrl, Origin: siteOrigin });
+  if (sp.status !== 200) return { fail: `oynatıcı sayfası açılmadı (${sp.status})` };
+  const vm = sp.text.match(/api\/(?:stream|token|thumb)\.php\?v=([0-9a-f]{16,64})/i);
+  if (!vm) return { fail: 'oynatıcı sayfasında video no yok' };
+  const V = vm[1];
+  const tk = await httpGet(`${pOrigin}/api/token.php?v=${V}`, { Referer: sUrl, Origin: pOrigin }, 12000, 20000);
+  let tok = null;
+  try { const j = JSON.parse(tk.text); if (j && j.ok && j.token) tok = j.token; } catch (_) {}
+  if (!tok) return { fail: `token alınamadı (${tk.status})` };
+  const link = `${pOrigin}/api/stream.php?v=${V}&token=${tok}`;
+  const why = await playableWithoutHeaders(link);
+  if (why) return { fail: 'başlıksız oynatma olmadı: ' + why };
+  return { source: { provider: 'varsayilan', url: link, type: 'hls', referer: sUrl, origin: pOrigin } };
 }
 
 function pickBest(cands, names, year, kind) {
@@ -134,11 +196,18 @@ module.exports = function register(app, { getBrowser, enqueue, resolve }) {
         const watchUrl = kind === 'movie'
           ? `${baseOf()}/film/${match.slug}`
           : `${baseOf()}/${match.slug}-${s}-sezon-${e}-bolum/`;
+        // Hızlı yol (Chromium'suz). Olmazsa eski yönteme dön.
+        let fastNote = '';
+        try {
+          const f = await fastLink(watchUrl);
+          if (f.source) return { site: 'dizigom', found: true, fast: true, match: { slug: match.slug, year: match.year }, watchUrl, sources: [f.source] };
+          fastNote = f.fail || '';
+        } catch (err) { fastNote = 'hızlı yol hatası: ' + String((err && err.message) || err); }
         const r = await enqueue(() => resolve(watchUrl, 25000));
         // master varsa ara playlistleri (p=stream_...) ayrı kaynak gösterme
         let sources = r.sources;
         if (sources.some((x) => !/[?&]p=/.test(x.url))) sources = sources.filter((x) => !/[?&]p=/.test(x.url));
-        return { site: 'dizigom', found: true, match: { slug: match.slug, year: match.year }, watchUrl, sources };
+        return { site: 'dizigom', found: true, fastNote, match: { slug: match.slug, year: match.year }, watchUrl, sources };
       });
       if (data.found && data.sources.length) cache.set(key, { t: Date.now(), data });
       res.json(data);
