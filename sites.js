@@ -42,12 +42,59 @@ function all() {
   return out;
 }
 
+// ---- İstek kaydı: hangi yapım ne kadar sürdü, neden yavaş kaldı? (/log) ----
+const logs = [];
+function logMiddleware(req, res, next) {
+  const path = String(req.path || req.url || '');
+  if (!/^\/find/.test(path)) return next();
+  const t0 = Date.now();
+  let body = null;
+  const j = res.json.bind(res);
+  res.json = (b) => { body = b; return j(b); };
+  res.on('finish', () => {
+    const b = body || {};
+    const q = req.query || {};
+    logs.unshift({
+      t: new Date().toISOString().slice(11, 19) + 'Z',
+      site: path.replace(/^\/find\/?/, '') || 'carnoots',
+      names: String(q.names || '').slice(0, 60),
+      type: q.type || '',
+      s: q.s || '', e: q.e || '',
+      ms: Date.now() - t0,
+      status: res.statusCode,
+      found: b.found, fast: b.fast, cached: b.cached,
+      n: Array.isArray(b.sources) ? b.sources.length : 0,
+      note: b.fastNote || b.error || ''
+    });
+    if (logs.length > 60) logs.pop();
+  });
+  next();
+}
+
+function logText() {
+  if (!logs.length) return 'Henüz kayıt yok. (Sunucu yeniden başladıysa kayıtlar sıfırlanır.)';
+  return logs.map((l) => {
+    const sec = (l.ms / 1000).toFixed(1) + ' sn';
+    const ep = l.type === 'movie' ? 'film' : (l.s || l.e ? `s${l.s}e${l.e}` : '');
+    let sonuc = l.status !== 200 ? 'HATA ' + l.status : !l.found ? 'bulunamadı' : l.n ? `${l.n} kaynak` : 'sayfa bulundu ama LİNK YOK';
+    let yol = !l.found ? 'arama sonucu' : l.cached ? 'önbellek' : l.fast ? 'HIZLI (Chromium yok)' : l.site === 'dizigom' ? 'CHROMIUM yoluna düştü' : 'tarayıcı';
+    const yavas = l.ms > 8000 ? '  <== YAVAŞ' : '';
+    return `${l.t}  ${l.site.padEnd(13)} ${(l.names + ' ' + ep).trim()}\n    -> ${sonuc} | ${yol} | ${sec}${yavas}${l.note ? '\n    neden: ' + l.note : ''}`;
+  }).join('\n');
+}
+
 let registered = false;
 function register(app) {
   if (registered) return;
   registered = true;
   // Uygulama bu adresten desenleri okur (TV'ye yeniden kurulum gerekmez)
+  if (typeof app.use === 'function') app.use(logMiddleware);
   app.get('/sites', (req, res) => res.json(all()));
+  app.get('/log', (req, res) => res.type('html').send(
+    '<!doctype html><html lang="en" translate="no"><head><meta charset="utf-8"><meta name="google" content="notranslate">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="background:#111;color:#ddd;margin:8px">' +
+    '<pre translate="no" style="white-space:pre-wrap;word-break:break-all;font:12px monospace">' +
+    logText().replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre></body></html>'));
   try { require('./trace')(app); } catch (e) { console.error('trace yüklenemedi:', e.message); }
 }
 
