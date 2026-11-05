@@ -68,6 +68,17 @@ function urlsOf(text, base) {
   return [...out].slice(0, 25);
 }
 
+
+// "absolute inset-0 h-full w-full" kutusunun hemen önündeki özellik: oynatıcı kimliği
+function mountId(html) {
+  const i = html.indexOf('absolute inset-0 h-full w-full');
+  if (i < 0) return null;
+  const before = html.slice(Math.max(0, i - 400), i);
+  const all = [...before.matchAll(/([A-Za-z][\w-]*)=["']([A-Za-z0-9_-]{16,40})["']/g)];
+  const m = all[all.length - 1];
+  return m ? { attr: m[1], id: m[2] } : null;
+}
+
 module.exports = function register(app) {
   app.get('/trace', async (req, res) => {
     const out = [];
@@ -93,6 +104,14 @@ module.exports = function register(app) {
       line(`durum: ${page.status}  tür: ${page.type}  boyut: ${page.len}  son adres: ${page.url}`);
       if (page.error) line('hata: ' + page.error);
       const ifr = iframesOf(page.text, page.url || url);
+      const mid = mountId(page.text);
+      line(''); line('oynatıcı kimliği: ' + (mid ? `${mid.attr}="${mid.id}"` : '(bulunamadı)'));
+      const coreUrl = scriptSrcs(page.text, page.url || url).find((u) => /(player|core|embed)/i.test(u) && !/googletagmanager|wargamings/i.test(u));
+      if (mid && coreUrl) {
+        const built = new URL(coreUrl).origin + '/assets/js/s.php?s=' + encodeURIComponent(mid.id);
+        line('kurulan oynatıcı adresi (core.js mantığına göre): ' + built);
+        if (!ifr.includes(built)) ifr.push(built);
+      }
       line(''); line('iframe adresleri (' + ifr.length + '):'); ifr.forEach((u) => line('  ' + u));
       const sc = scriptSrcs(page.text, page.url || url).slice(0, 15);
       line(''); line('harici script adresleri (ilk 15):'); sc.forEach((u) => line('  ' + u));
@@ -133,6 +152,7 @@ module.exports = function register(app) {
           const r = await get(picks[i], { Referer: url, Origin: origin }, 12000, 400000);
           line(''); line(`== SCRIPT ${i + 1}) ${picks[i]} ==`); line(`durum: ${r.status}  tür: ${r.type}  boyut: ${r.len}`);
           line('ilk 300 karakter: ' + r.text.slice(0, 300).replace(/\s+/g, ' '));
+          if (r.len <= 8000) { line('betiğin tamamı:'); line(r.text.replace(/\s+/g, ' ').slice(0, 7000)); }
           line('link kurma / ağ çağrısı içeren parçalar:');
           context(r.text, /(fetch\(|XMLHttpRequest|stream\.php|s\.php|token|createElement\(["']iframe|\.src\s*=|data-player|\/api\/|atob\()/i, 16, 150).forEach((c) => line('  • ' + c));
         }
