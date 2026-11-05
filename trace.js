@@ -1,6 +1,7 @@
 // İnceleme adresi: bir sayfa tarayıcısız nasıl açılıyor, oynatıcı linki nereden alıyor?
 // Kullanım: /trace?url=BÖLÜM-SAYFASI            (sayfa + oynatıcı sayfaları)
 //           /trace?url=BÖLÜM-SAYFASI&follow=1   (ek olarak oynatıcının API adreslerini de dener)
+//           /trace?url=...&follow=1&scripts=1   (ek olarak oynatıcı betiklerinin içine de bakar)
 // Sadece sites.json'daki sitelere izin verir. Çıktı kopyalanabilir düz metindir.
 const sites = require('./sites');
 
@@ -86,18 +87,30 @@ module.exports = function register(app) {
       });
       if (!host || !allowed) { line('HATA: url gerekli ve sites.json içindeki sitelerden biri olmalı.'); return send(); }
 
+      const origin = new URL(url).origin;
       line('== 1) SAYFA =='); line('istenen: ' + url);
       const page = await get(url, {});
       line(`durum: ${page.status}  tür: ${page.type}  boyut: ${page.len}  son adres: ${page.url}`);
       if (page.error) line('hata: ' + page.error);
-      const origin = new URL(url).origin;
-
       const ifr = iframesOf(page.text, page.url || url);
       line(''); line('iframe adresleri (' + ifr.length + '):'); ifr.forEach((u) => line('  ' + u));
       const sc = scriptSrcs(page.text, page.url || url).slice(0, 15);
       line(''); line('harici script adresleri (ilk 15):'); sc.forEach((u) => line('  ' + u));
+      line(''); line('data-player etiketleri (oynatıcı kutusu):');
+      const dp = page.text.match(/<[a-z]+\b[^>]*\bdata-player\b[^>]*>/gi) || [];
+      dp.slice(0, 4).forEach((t) => line('  ' + t.replace(/\s+/g, ' ').slice(0, 700)));
+      if (!dp.length) line('  (yok)');
+      line(''); line('data-* özellikleri içeren, oynatıcıyla ilgili etiketler:');
+      (page.text.match(/<[a-z]+\b[^>]*\bdata-(?:embed|src|video|player-[a-z]+|stream|id|s|key)=[^>]*>/gi) || [])
+        .filter((t) => !/\.(webp|jpg|png)/i.test(t)).slice(0, 8).forEach((t) => line('  ' + t.replace(/\s+/g, ' ').slice(0, 400)));
+      line(''); line('sayfada geçen oynatıcı/API adresleri:');
+      urlsOf(page.text, page.url || url).filter((u) => !/\.(webp|jpg|png|css)|googletagmanager|schema\.org/i.test(u) && !u.startsWith(origin)).slice(0, 15).forEach((u) => line('  ' + u));
       line(''); line('sayfada ipucu içeren parçalar:');
-      context(page.text, /(m3u8|stream\.php|data-video|embed|player-?(?:url|src)|alternative)/i, 12).forEach((c) => line('  • ' + c));
+      context(page.text, /(m3u8|stream\.php|s\.php|pilavyerplay|data-embed|createElement\(["']iframe|\.src\s*=|player-?(?:url|src)|alternative)/i, 14).forEach((c) => line('  • ' + c));
+
+      // Sayfada s.php?s=... gibi bir oynatıcı adresi geçiyorsa onu da dene
+      const direct = (page.text.match(/https?:\/\/[^"'\s<>\\]*(?:s\.php|embed)[^"'\s<>\\]*/gi) || []).filter((u) => !u.startsWith(origin));
+      direct.forEach((u) => { const a = abs(u, url); if (a && !ifr.includes(a)) ifr.push(a); });
 
       const targets = ifr.filter(okHost).slice(0, 3);
       const apis = [];
@@ -111,6 +124,19 @@ module.exports = function register(app) {
         line(''); line('adres benzeri parçalar:'); urlsOf(r.text, r.url || u).forEach((x) => { line('  ' + x); apis.push({ u: x, ref: u }); });
         line(''); line('istek/ağ çağrısı içeren parçalar:');
         context(r.text, /(fetch\(|XMLHttpRequest|\$\.ajax|\$\.get|\.open\(|atob\(|eval\(function)/i, 10).forEach((c) => line('  • ' + c));
+      }
+
+      if (req.query.scripts === '1') {
+        const picks = scriptSrcs(page.text, page.url || url)
+          .filter((u) => /(player|core|embed|stream|play)/i.test(u) && !/googletagmanager|wargamings/i.test(u) && okHost(u)).slice(0, 2);
+        for (let i = 0; i < picks.length; i++) {
+          const r = await get(picks[i], { Referer: url, Origin: origin }, 12000, 400000);
+          line(''); line(`== SCRIPT ${i + 1}) ${picks[i]} ==`); line(`durum: ${r.status}  tür: ${r.type}  boyut: ${r.len}`);
+          line('ilk 300 karakter: ' + r.text.slice(0, 300).replace(/\s+/g, ' '));
+          line('link kurma / ağ çağrısı içeren parçalar:');
+          context(r.text, /(fetch\(|XMLHttpRequest|stream\.php|s\.php|token|createElement\(["']iframe|\.src\s*=|data-player|\/api\/|atob\()/i, 16, 150).forEach((c) => line('  • ' + c));
+        }
+        if (!picks.length) line('(indirilecek oynatıcı betiği bulunamadı)');
       }
 
       if (follow) {
