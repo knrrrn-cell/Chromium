@@ -60,6 +60,7 @@ function context(text, re, max, radius = 110) {
 }
 
 function urlsOf(text, base) {
+  text = String(text).replace(/&amp;/g, '&');
   const out = new Set();
   (text.match(/https?:\/\/[^"'\s<>\\)]+/g) || []).forEach((u) => { if (/(api|stream|m3u8|token|\.php|\.mp4|playlist|embed|player)/i.test(u)) out.add(u); });
   const rel = /["'](\/[^"'\s]*(?:api|stream|token|player)[^"'\s]*)["']/gi;
@@ -133,10 +134,12 @@ module.exports = function register(app) {
 
       const targets = ifr.filter(okHost).slice(0, 3);
       const apis = [];
+      const pages = [];
       for (let i = 0; i < targets.length; i++) {
         const u = targets[i];
         line(''); line(`== 2.${i + 1}) OYNATICI SAYFASI ==`); line('istenen: ' + u + '   (Referer: ' + url + ')');
         const r = await get(u, { Referer: url, Origin: origin });
+        pages.push({ u, text: r.text });
         line(`durum: ${r.status}  tür: ${r.type}  boyut: ${r.len}`);
         if (r.error) line('hata: ' + r.error);
         line(''); line('ilk 1200 karakter:'); line(r.text.slice(0, 1200).replace(/\s+/g, ' '));
@@ -157,17 +160,54 @@ module.exports = function register(app) {
           context(r.text, /(fetch\(|XMLHttpRequest|stream\.php|s\.php|token|createElement\(["']iframe|\.src\s*=|data-player|\/api\/|atob\()/i, 16, 150).forEach((c) => line('  • ' + c));
         }
         if (!picks.length) line('(indirilecek oynatıcı betiği bulunamadı)');
+        for (const pg of pages) {
+          const ps = scriptSrcs(pg.text, pg.u).filter((u) => /player/i.test(u) && okHost(u)).slice(0, 2);
+          for (let i = 0; i < ps.length; i++) {
+            const r = await get(ps[i], { Referer: pg.u, Origin: new URL(pg.u).origin }, 12000, 600000);
+            line(''); line(`== OYNATICI BETİĞİ) ${ps[i]} ==`); line(`durum: ${r.status}  tür: ${r.type}  boyut: ${r.len}`);
+            line('token / stream / ağ çağrısı içeren parçalar:');
+            context(r.text, /(token\.php|stream\.php|sub\.php|beat\.php|fetch\(|XMLHttpRequest|headers\s*:|X-[A-Za-z-]+|Authorization|sendBeacon)/i, 22, 200).forEach((c) => line('  • ' + c));
+          }
+        }
       }
 
       if (follow) {
-        const tries = apis.filter((a) => okHost(a.u) && /(api|stream|token|\.php)/i.test(a.u)).slice(0, 4);
+        const sameHost = (a, b) => { try { return new URL(a).hostname === new URL(b).hostname; } catch (_) { return false; } };
+        const prio = (u) => (/token\.php/.test(u) ? 0 : /stream\.php/.test(u) ? 1 : /sub\.php/.test(u) ? 2 : 3);
+        const seen = new Set();
+        const tries = apis
+          .filter((a) => okHost(a.u) && sameHost(a.u, a.ref) && /\/api\/[a-z]+\.php/i.test(a.u))
+          .filter((a) => (seen.has(a.u) ? false : seen.add(a.u)))
+          .sort((x, y) => prio(x.u) - prio(y.u)).slice(0, 6);
         line(''); line('== 3) OYNATICININ API ADRESLERİ (follow=1) ==');
         for (const a of tries) {
           const r = await get(a.u, { Referer: a.ref, Origin: new URL(a.ref).origin }, 12000, 60000);
           line(''); line('istenen: ' + a.u); line(`durum: ${r.status}  tür: ${r.type}  boyut: ${r.len}`);
-          line(r.text.slice(0, 700).replace(/\s+/g, ' '));
+          line(r.text.slice(0, 500).replace(/\s+/g, ' '));
         }
         if (!tries.length) line('(denenecek API adresi bulunamadı)');
+
+        // Zincir: oynatıcının kendi adımları (token al -> stream iste)
+        const pg = pages.find((p) => /s\.php/.test(p.u)) || pages[0];
+        const vm = pg && pg.text.match(/api\/(?:stream|token|thumb)\.php\?v=([0-9a-f]{16,64})/i);
+        if (pg && vm) {
+          const V = vm[1];
+          const pOrigin = new URL(pg.u).origin;
+          const H = { Referer: pg.u, Origin: pOrigin };
+          line(''); line('== 4) ZİNCİR DENEMESİ (oynatıcının kendi adımları) =='); line('video no (v): ' + V);
+          const t1 = await get(`${pOrigin}/api/token.php?v=${V}`, H, 12000, 20000);
+          line(`token.php -> durum: ${t1.status}  tür: ${t1.type}`); line(t1.text.slice(0, 500).replace(/\s+/g, ' '));
+          let tok = null;
+          try { const j = JSON.parse(t1.text); tok = j.token || j.t || null; } catch (_) {}
+          if (!tok) { const m = t1.text.match(/eyJ[\w-]+\.[0-9a-f]{32,}/); if (m) tok = m[0]; }
+          const th = pg.text.replace(/&amp;/g, '&').match(/token=(eyJ[\w-]+\.[0-9a-f]{32,})/);
+          const useTok = tok || (th && th[1]) || '';
+          line('stream.php için token: ' + (tok ? "token.php'den geldi" : th ? "sayfadaki thumb token'ı kullanıldı" : 'yok'));
+          if (useTok) {
+            const s1 = await get(`${pOrigin}/api/stream.php?v=${V}&token=${useTok}`, H, 12000, 20000);
+            line(`stream.php -> durum: ${s1.status}  tür: ${s1.type}  boyut: ${s1.len}`); line(s1.text.slice(0, 500).replace(/\s+/g, ' '));
+          }
+        }
       } else {
         line(''); line('Not: oynatıcının API adreslerini de denemek için adresin sonuna &follow=1 ekle.');
       }
